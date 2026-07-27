@@ -14,3 +14,9 @@ python-docx
 unstructured
 chromadb
 tabulate
+sqlalchemy
+psycopg2-binary
+bcrypt
+python-jose[cryptography]
+python-dotenv
+pydantic[email]
