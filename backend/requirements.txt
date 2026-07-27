@@ -1,0 +1,16 @@
+fastapi
+uvicorn[standard]
+python-multipart
+langchain-core
+langchain-google-genai
+langchain-community
+langchain-text-splitters
+langgraph
+pydantic
+pandas
+numpy
+PyMuPDF
+python-docx
+unstructured
+chromadb
+tabulate
