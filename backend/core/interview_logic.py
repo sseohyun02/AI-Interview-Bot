@@ -9,6 +9,9 @@ import warnings
 import random
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from typing import Annotated, Literal, Sequence, TypedDict
 
 from langchain_core.messages import BaseMessage, HumanMessage
@@ -27,6 +30,7 @@ import tempfile
 
 from langchain_community.document_loaders import UnstructuredWordDocumentLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+
 def extract_text_from_file(file_path: str) -> str:
   ext = os.path.splitext(file_path)[1].lower()
   if ext == ".pdf":
@@ -180,12 +184,14 @@ def generate_question_strategy(state: InterviewState) -> InterviewState:
     return state
 
 
-
 def preProcessing_Interview(file_path: str) -> InterviewState:
-    """이력서 파일 입력 → 분석 → 질문전략 생성 → 첫 질문 선택"""
-
-    # 파일 입력
+    """이력서 파일 경로 입력 → 텍스트 추출 후 처리"""
     resume_text = extract_text_from_file(file_path)
+    return preProcessing_Interview_from_text(resume_text)
+
+
+def preProcessing_Interview_from_text(resume_text: str) -> InterviewState:
+    """이력서 텍스트 입력 → 분석 → 질문전략 생성 → 첫 질문 선택"""
 
     # 초기 state 설정
     state: InterviewState = {
@@ -199,7 +205,7 @@ def preProcessing_Interview(file_path: str) -> InterviewState:
         "conversation": [],
         "evaluation": [],
         "next_step": "",
-        "deep_counts" : {}
+        "deep_counts": {}
     }
 
     # 1) Resume 분석
@@ -208,22 +214,19 @@ def preProcessing_Interview(file_path: str) -> InterviewState:
     # 2) 질문 전략 생성
     state = generate_question_strategy(state)
 
-    # 3) 첫 질문 선택 (랜덤 면접관 & 랜덤 영역)
+    # 3) 첫 질문 선택
     strategy = state["question_strategy"]
-
     categories = ["경험", "동기", "논리"]
     interviewers = ["A", "B", "C"]
+    cat = categories[0]
+    iv = random.choice(interviewers)
+    selected_question = strategy[cat][iv]
 
-    cat = categories[0]   # 카테고리 고정
-    iv = random.choice(interviewers)  # 면접관 랜덤
-
-    selected_question = strategy[cat][iv]  # 지금 구조는 문자열이므로 바로 사용 가능
-
-    # 상태 업데이트
     state["current_question"] = selected_question
     state["current_strategy"] = f"{cat}"
 
     return state
+
 
 def update_current_answer(state: InterviewState, user_answer: str) -> InterviewState:
     return {
