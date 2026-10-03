@@ -1,151 +1,132 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
+import { api, getToken, setToken } from "./api"
+import Auth from "./screens/Auth"
+import Home from "./screens/Home"
+import Prep from "./screens/Prep"
+import Interview from "./screens/Interview"
+import Analyzing from "./screens/Analyzing"
+import Report from "./screens/Report"
 
-const API_BASE = "http://localhost:8080"
-
-function App() {
-  const [sessionId, setSessionId] = useState(null)
-  const [file, setFile] = useState(null)
-  const [loading, setLoading] = useState(false)
-
-  // 대화 내역: { role: "면접관" | "지원자", text: "..." } 객체들의 배열
-  const [messages, setMessages] = useState([])
-  // 답변 입력칸의 현재 값
-  const [answer, setAnswer] = useState("")
-  // 면접 종료 여부
-  const [ended, setEnded] = useState(false)
-  // 최종 리포트
-  const [report, setReport] = useState("")
-
-  // 면접 시작
-  async function startInterview() {
-    if (!file) {
-      alert("이력서 파일을 선택해주세요.")
-      return
-    }
-    setLoading(true)
-    try {
-      const formData = new FormData()
-      formData.append("file", file)
-
-      const res = await fetch(`${API_BASE}/api/interview/start`, {
-        method: "POST",
-        body: formData,
-      })
-      const data = await res.json()
-
-      setSessionId(data.session_id)
-      // 첫 질문을 대화 목록에 추가
-      setMessages([{ role: "면접관", text: data.question }])
-    } catch (err) {
-      alert("면접 시작 중 오류가 발생했습니다.")
-      console.error(err)
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  // 답변 제출
-  async function submitAnswer() {
-    if (!answer.trim()) return
-    setLoading(true)
-
-    // 내가 쓴 답변을 먼저 대화 목록에 추가
-    const myAnswer = answer
-    setMessages((prev) => [...prev, { role: "지원자", text: myAnswer }])
-    setAnswer("")  // 입력칸 비우기
-
-    try {
-      const res = await fetch(`${API_BASE}/api/interview/answer`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session_id: sessionId, answer: myAnswer }),
-      })
-      const data = await res.json()
-
-      if (data.ended) {
-        // 면접 종료 → 최종 리포트 표시
-        setEnded(true)
-        setReport(data.final_report)
-      } else {
-        // 다음 질문을 대화 목록에 추가
-        setMessages((prev) => [...prev, { role: "면접관", text: data.question }])
-      }
-    } catch (err) {
-      alert("답변 제출 중 오류가 발생했습니다.")
-      console.error(err)
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  // === 화면 1: 업로드 화면 ===
-  if (!sessionId) {
-    return (
-      <div style={{ maxWidth: 600, margin: "50px auto", padding: 20 }}>
-        <h1>AI 면접관</h1>
-        <p>이력서를 업로드하면 면접이 시작됩니다.</p>
-        <input
-          type="file"
-          accept=".pdf,.docx"
-          onChange={(e) => setFile(e.target.files[0])}
-        />
-        <br /><br />
-        <button onClick={startInterview} disabled={loading}>
-          {loading ? "준비 중..." : "면접 시작"}
-        </button>
-      </div>
-    )
-  }
-
-  // === 화면 3: 리포트 화면 ===
-  if (ended) {
-    return (
-      <div style={{ maxWidth: 600, margin: "50px auto", padding: 20 }}>
-        <h1>면접 결과</h1>
-        <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{report}</div>
-      </div>
-    )
-  }
-
-  // === 화면 2: 채팅 화면 ===
+// 상단 네비게이션 (면접/분석 화면에서는 숨김)
+function TopNav({ user, onHome, onNew, onLogout }) {
   return (
-    <div style={{ maxWidth: 600, margin: "50px auto", padding: 20 }}>
-      <h1>면접 진행 중</h1>
-
-      {/* 대화 목록 */}
-      <div style={{ border: "1px solid #ddd", borderRadius: 8, padding: 16, minHeight: 300, marginBottom: 16 }}>
-        {messages.map((msg, i) => (
-          <div key={i} style={{ marginBottom: 12, textAlign: msg.role === "지원자" ? "right" : "left" }}>
-            <div style={{ fontSize: 12, color: "#888" }}>{msg.role}</div>
-            <div style={{
-              display: "inline-block",
-              padding: "8px 12px",
-              borderRadius: 12,
-              background: msg.role === "지원자" ? "#dbeafe" : "#f3f4f6",
-            }}>
-              {msg.text}
-            </div>
-          </div>
-        ))}
+    <div className="topnav">
+      <div className="nav-left">
+        <button
+          onClick={onHome}
+          style={{ background: "none", border: "none", padding: 0, display: "flex", alignItems: "center" }}
+        >
+          <span className="logo-mark" />
+        </button>
+        <div className="nav-links">
+          <button onClick={onHome}>홈</button>
+          <button onClick={onNew}>새 면접</button>
+        </div>
       </div>
-
-      {/* 답변 입력 */}
-      <div style={{ display: "flex", gap: 8 }}>
-        <input
-          type="text"
-          value={answer}
-          onChange={(e) => setAnswer(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter") submitAnswer() }}
-          placeholder="답변을 입력하세요"
-          disabled={loading}
-          style={{ flex: 1, padding: 8 }}
-        />
-        <button onClick={submitAnswer} disabled={loading}>
-          {loading ? "처리 중..." : "전송"}
+      <div className="nav-right">
+        <span className="nav-user">{user.name}님</span>
+        <button className="btn btn-sm" onClick={onLogout}>
+          로그아웃
         </button>
       </div>
     </div>
   )
 }
 
-export default App
+export default function App() {
+  const [user, setUser] = useState(null)
+  const [booting, setBooting] = useState(true)
+  const [view, setView] = useState("home") // home | prep | interview | analyzing | report
+  const [interview, setInterview] = useState(null)
+  const [report, setReport] = useState(null)
+
+  // 최초 진입: 저장된 토큰이 있으면 내 정보 조회해 자동 로그인
+  useEffect(() => {
+    const t = getToken()
+    if (!t) {
+      setBooting(false)
+      return
+    }
+    api
+      .me()
+      .then(setUser)
+      .catch(() => setToken(null))
+      .finally(() => setBooting(false))
+  }, [])
+
+  function handleAuthed(u) {
+    setUser(u)
+    setView("home")
+  }
+
+  function logout() {
+    setToken(null)
+    setUser(null)
+    setInterview(null)
+    setReport(null)
+    setView("home")
+  }
+
+  // 면접 시작 (홈/준비 화면 양쪽에서 호출). 실패 시 호출한 화면이 에러를 표시하도록 throw.
+  async function beginInterview(resume) {
+    const res = await api.startInterview(resume.id)
+    setInterview({
+      sessionId: res.session_id,
+      resumeMeta: resume,
+      messages: [{ role: "ai", text: res.question }],
+      answeredCount: 0,
+    })
+    setReport(null)
+    setView("interview")
+  }
+
+  if (booting) return <div className="boot">불러오는 중…</div>
+  if (!user) return <Auth onAuthed={handleAuthed} />
+
+  const showNav = view !== "interview"
+
+  return (
+    <div className="app">
+      {showNav && (
+        <TopNav user={user} onHome={() => setView("home")} onNew={() => setView("prep")} onLogout={logout} />
+      )}
+
+      {view === "home" && <Home user={user} onNew={() => setView("prep")} onStart={beginInterview} />}
+
+      {view === "prep" && <Prep onStart={beginInterview} onHome={() => setView("home")} />}
+
+      {view === "interview" && (
+        <Interview
+          state={interview}
+          setState={setInterview}
+          onEnd={(rep) => {
+            setReport(rep)
+            setView("analyzing")
+          }}
+          onExit={() => {
+            setInterview(null)
+            setView("home")
+          }}
+        />
+      )}
+
+      {view === "analyzing" && (
+        <Analyzing count={report?.report_data?.total_questions} onDone={() => setView("report")} />
+      )}
+
+      {view === "report" && (
+        <Report
+          report={report}
+          onHome={() => setView("home")}
+          onRetry={async () => {
+            try {
+              await beginInterview(report.resumeMeta)
+            } catch {
+              setView("home")
+            }
+          }}
+        />
+      )}
+    </div>
+  )
+}
