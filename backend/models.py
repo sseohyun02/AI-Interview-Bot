@@ -26,6 +26,12 @@ class Resume(Base):
     id = Column(Integer, primary_key=True, index=True)
     title = Column(String, nullable=False)          # 이력서 제목 (예: "네이버 지원용")
     content = Column(Text, nullable=False)          # 이력서에서 추출한 텍스트
+
+    # 지원 대상. 면접관 페르소나와 평가 기준을 이 두 값으로 구성한다.
+    # 기존 행을 깨지 않도록 nullable 로 두고, 비어 있으면 아래 기본값을 쓴다.
+    company = Column(String, nullable=True)         # 지원 기업 (예: "KT")
+    position = Column(String, nullable=True)        # 지원 직무 (예: "AI 엔지니어")
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     # 이 이력서의 주인 (users 테이블과 연결)
