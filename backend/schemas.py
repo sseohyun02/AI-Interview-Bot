@@ -34,6 +34,8 @@ class Token(BaseModel):
 class ResumeOut(BaseModel):
     id: int
     title: str
+    company: str | None = None   # 지원 기업
+    position: str | None = None  # 지원 직무
     created_at: str | None = None
 
     class Config:

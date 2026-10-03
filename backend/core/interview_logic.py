@@ -45,21 +45,30 @@ def extract_text_from_file(file_path: str) -> str:
     raise ValueError("지원하지 않는 파일 형식입니다. PDF 또는 DOCX만 허용됩니다.")
 
 
-class InterviewState(TypedDict):
+# 기업·직무를 입력받지 못했을 때 쓰는 기본값.
+DEFAULT_COMPANY = "지원 기업"
+DEFAULT_POSITION = "지원 직무"
+
+
+class InterviewState(TypedDict, total=False):
     # 고정 정보
     resume_text: str
     resume_summary: str
     resume_keywords: List[str]
-    question_strategy: Dict[str, Dict]
+    company: str                 # 지원 기업명 (면접관 페르소나 구성에 사용)
+    position: str                # 지원 직무명
+    question_strategy: Dict[str, Dict[str, str]]
 
     # 인터뷰 로그
     current_question: str
     current_answer: str
     current_strategy: str
     conversation: List[Dict[str, str]]
-    evaluation : List[Dict[str, str]]
-    next_step : str
-    deep_counts : Dict[str, Dict]
+    # {영역: {지표: 점수, question, answer, _n, _sum_지표...}} 형태의 2층 딕셔너리.
+    evaluation: Dict[str, Dict[str, object]]
+    next_step: str
+    deep_counts: Dict[str, int]  # {영역: 심화질문 누적 횟수}
+    final_report: str            # summarize_interview() 가 마지막에 채운다
 
 
 
@@ -78,10 +87,15 @@ def analyze_resume(state: InterviewState) -> InterviewState:
   # 1. 이력서 텍스트 가져오기
   resume_text = state["resume_text"]
 
+  company = state.get("company") or DEFAULT_COMPANY
+  position = state.get("position") or DEFAULT_POSITION
+
   # 2. 프롬프트 구성
   prompt_template = ChatPromptTemplate.from_messages([
       ("system",
-        "당신은 인사 당담자입니다. 다음 이력서 텍스트를 분석하여 핵심 요약과 주요 키워드를 도출하세요. "
+        "당신은 {company}의 {position} 직무 인사담당자입니다. "
+        "다음 이력서 텍스트를 분석하여 핵심 요약과 주요 키워드를 도출하세요. "
+        "해당 직무와의 관련성이 높은 내용을 우선해서 뽑으세요. "
         "결과는 JSON 형태로 반환하세요. "
         "1. summary: 이력서 핵심 요약 (3~5문장) "
         "2. keywords: 주요 키워드 목록 (핵심 역량, 기술, 성과, 강점 등)"),
@@ -90,7 +104,11 @@ def analyze_resume(state: InterviewState) -> InterviewState:
 
   # 3. LLM 실행 (Pydantic 구조화 출력)
   chain = prompt_template | llm.with_structured_output(ResumeAnalysis)
-  result: ResumeAnalysis = chain.invoke({"resume_text": resume_text})
+  result: ResumeAnalysis = chain.invoke({
+      "resume_text": resume_text,
+      "company": company,
+      "position": position,
+  })
 
   # 4. 상태 업데이트 및 반환
   return {
@@ -116,10 +134,12 @@ class QSMultiOutput(BaseModel):  # 세 명의 면접관
 def generate_question_strategy(state: InterviewState) -> InterviewState:
     summary = state.get("resume_summary", "")
     keywords = state.get("resume_keywords", [])
+    company = state.get("company") or DEFAULT_COMPANY
+    position = state.get("position") or DEFAULT_POSITION
 
     prompt = ChatPromptTemplate.from_messages([
         ("system",
-         "당신은 시니어 인사담당 면접관입니다.\n"
+         "당신은 {company}의 {position} 직무 채용을 담당하는 시니어 면접관입니다.\n"
          "아래 이력서를 기반으로 **3명의 면접관(A/B/C)**에 대해 면접 질문 전략을 만듭니다.\n\n"
 
          "면접관 역할:\n"
@@ -159,7 +179,9 @@ def generate_question_strategy(state: InterviewState) -> InterviewState:
     chain = prompt | llm.with_structured_output(QSMultiOutput)
     result: QSMultiOutput = chain.invoke({
         "summary": summary,
-        "keywords": ", ".join(keywords) if isinstance(keywords, list) else str(keywords)
+        "keywords": ", ".join(keywords) if isinstance(keywords, list) else str(keywords),
+        "company": company,
+        "position": position,
     })
 
     strategy_dict = {
@@ -184,28 +206,40 @@ def generate_question_strategy(state: InterviewState) -> InterviewState:
     return state
 
 
-def preProcessing_Interview(file_path: str) -> InterviewState:
+def preProcessing_Interview(
+    file_path: str,
+    company: str = "",
+    position: str = "",
+) -> InterviewState:
     """이력서 파일 경로 입력 → 텍스트 추출 후 처리"""
     resume_text = extract_text_from_file(file_path)
-    return preProcessing_Interview_from_text(resume_text)
+    return preProcessing_Interview_from_text(resume_text, company, position)
 
 
-def preProcessing_Interview_from_text(resume_text: str) -> InterviewState:
-    """이력서 텍스트 입력 → 분석 → 질문전략 생성 → 첫 질문 선택"""
+def preProcessing_Interview_from_text(
+    resume_text: str,
+    company: str = "",
+    position: str = "",
+) -> InterviewState:
+    """이력서 텍스트 + 지원 기업/직무 입력 → 분석 → 질문전략 생성 → 첫 질문 선택"""
 
     # 초기 state 설정
+    # evaluation 은 {영역: {지표: 점수}} 형태로 쓰이므로 처음부터 딕셔너리로 둔다.
     state: InterviewState = {
         "resume_text": resume_text,
         "resume_summary": "",
         "resume_keywords": [],
+        "company": (company or "").strip() or DEFAULT_COMPANY,
+        "position": (position or "").strip() or DEFAULT_POSITION,
         "question_strategy": {},
         "current_question": "",
         "current_answer": "",
         "current_strategy": "",
         "conversation": [],
-        "evaluation": [],
+        "evaluation": {},
         "next_step": "",
-        "deep_counts": {}
+        "deep_counts": {},
+        "final_report": "",
     }
 
     # 1) Resume 분석
@@ -248,6 +282,12 @@ class FourCriteriaEval(BaseModel):
     logic: BinCriterion        # 논리성
 
 
+# 평가 지표 4종. evaluation[영역] 안에는 이 4개 키 외에
+# question / answer / _n / _sum_* 같은 메타 키가 함께 들어 있으므로,
+# 점수를 읽을 때는 반드시 이 목록만 순회해야 한다.
+CRITERIA = ("구체성", "일관성", "적합성", "논리성")
+
+
 # ===== 헬퍼: state 스키마 보정 =====
 def _ensure_state_schema(state: Dict) -> Dict:
     ev = state.get("evaluation")
@@ -285,28 +325,6 @@ def _ensure_state_schema(state: Dict) -> Dict:
     return state
 
 
-# ===== 헬퍼: 0점 지표 기반 후속질문 생성 =====
-def _make_followup_question(strategy: str, zeros: List[str], prev_q: str) -> str:
-    # 한글 지표명 표준화
-    norm = {"구체적":"구체성", "구체성":"구체성", "일관성":"일관성", "적합성":"적합성", "논리성":"논리성"}
-    zeros = [norm.get(z, z) for z in zeros]
-
-    parts = []
-    if "구체성" in zeros:
-        parts.append("정확도/처리시간 등 **수치**, 본인 **역할**, 적용한 **방법**(전처리/모델/튜닝), 그리고 **Before→After 변화**를 수치로 알려주세요.")
-    if "일관성" in zeros:
-        parts.append("주장→근거→사례의 **흐름**이 보이도록 STAR 구조(상황-과제-행동-결과)로 정리해서 답해주세요.")
-    if "적합성" in zeros:
-        parts.append("해당 경험이 **KT의 AI/DX 전략** 혹은 **지원 직무 과업**과 **어떻게 연결**되는지 명확히 밝혀주세요.")
-    if "논리성" in zeros:
-        parts.append("문제 **원인** 분석→시도한 **대안**→선택 **근거**→**결과** 및 **교훈** 순서로 설명해주세요.")
-
-    tail = " ".join(parts) if parts else "핵심 근거와 수치를 보강해 구체적으로 답해주세요."
-    head = "이전 답변을 보강해주세요. " if prev_q else ""
-    return f"{head}{strategy} 영역에서 다음을 중심으로 다시 답변해 주세요. {tail}"
-
-
-# ===== 메인: 평가 + 라우팅(조건1/2) + few-shot 프롬프트 =====
 # ===== 메인: 평가 + 라우팅(조건1/2) + few-shot 프롬프트 =====
 def evaluate_answer(state: Dict) -> Dict:
     state = _ensure_state_schema(state)
@@ -314,6 +332,8 @@ def evaluate_answer(state: Dict) -> Dict:
     question = state.get("current_question", "")
     answer   = state.get("current_answer", "")
     strategy = state.get("current_strategy", "기본")
+    company  = state.get("company") or DEFAULT_COMPANY
+    position = state.get("position") or DEFAULT_POSITION
     resume_ctx = {
         "summary": state.get("resume_summary", ""),
         "keywords": ", ".join(state.get("resume_keywords", []))
@@ -344,12 +364,13 @@ def evaluate_answer(state: Dict) -> Dict:
     # -------------------------------------------------
     prompt = ChatPromptTemplate.from_messages([
         ("system",
-         "너는 KT 면접관이다. 다음 4개 항목을 **서로 독립적으로** 0 또는 1로 채점하라. "
+         "너는 {company}의 {position} 직무 면접관이다. "
+         "다음 4개 항목을 **서로 독립적으로** 0 또는 1로 채점하라. "
          "하나의 항목이 1이라고 해서 다른 항목도 반드시 1일 필요는 없다. "
          "각 항목은 score(0/1)와 rationale(1~2문장)만 포함한다.\n"
          "- 구체성: 수치·사실·사례·역할·과정·결과가 명확(1) / 추상적·근거부족(0)\n"
          "- 일관성: 주장-근거-사례 흐름이 자연(1) / 모순·단절(0)\n"
-         "- 적합성: KT/직무/질문 의도에 직접 부합(1) / 일반론·동문서답(0)\n"
+         "- 적합성: 지원 기업/직무/질문 의도에 직접 부합(1) / 일반론·동문서답(0)\n"
          "- 논리성: 원인→행동→결과가 논리 전개(1) / 비약·누락(0)"
         ),
 
@@ -392,7 +413,9 @@ def evaluate_answer(state: Dict) -> Dict:
         "resume_keywords": resume_ctx["keywords"],
         "strategy": strategy,
         "question": question,
-        "answer": answer
+        "answer": answer,
+        "company": company,
+        "position": position,
     })
 
     # -------------------------------------------------
@@ -583,11 +606,21 @@ def change_strategy(state: InterviewState) -> InterviewState:
         "next_step": ""  # 이후 루프에서 질문 제시 → 답변 입력 → 평가 단계로 이동
     }
 
-# KT 핵심역량 및 비전
+# 참고자료 문서 경로.
+# 현재 assets 에는 KT 자료가 들어 있으나 추후 범용 면접/평가 자료로 교체할 예정이다.
+# 교체 시 코드를 고치지 않도록 환경변수로 덮어쓸 수 있게 해 둔다.
+ASSETS_DIR = os.path.join(os.path.dirname(__file__), "..", "assets")
+VALUES_DOC_PATH = os.environ.get(
+    "VALUES_DOC_PATH", os.path.join(ASSETS_DIR, "KT.docx")
+)       # 핵심가치·인재상 자료
+QUESTIONS_DOC_PATH = os.environ.get(
+    "QUESTIONS_DOC_PATH", os.path.join(ASSETS_DIR, "KT_interview.docx")
+)       # 예상 질문 자료
 
-# 1. 문서 로드 (이 부분은 성공적으로 진행됨)
-docx_path = os.path.join(os.path.dirname(__file__), "..", "assets", "KT.docx")
-docx_loader = UnstructuredWordDocumentLoader(docx_path)
+# 핵심가치·인재상 참고자료
+
+# 1. 문서 로드
+docx_loader = UnstructuredWordDocumentLoader(VALUES_DOC_PATH)
 documents_doc = docx_loader.load()
 full_text = "\n".join([doc.page_content for doc in documents_doc])
 
@@ -613,11 +646,10 @@ embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
 # (실제 환경에서는 persist_directory를 지정하여 캐시 문제를 방지하는 것이 좋음)
 vectordb = Chroma.from_texts(cleaned_split_texts, embeddings)
 
-# KT 핵심역량에 맞는 예시 질문
+# 예상 질문 참고자료
 
-# 1. 문서 로드 (이 부분은 성공적으로 진행됨)
-iv_docx_path = os.path.join(os.path.dirname(__file__), "..", "assets", "KT_interview.docx")
-iv_docx_loader = UnstructuredWordDocumentLoader(iv_docx_path)
+# 1. 문서 로드
+iv_docx_loader = UnstructuredWordDocumentLoader(QUESTIONS_DOC_PATH)
 iv_documents_doc = iv_docx_loader.load()
 iv_full_text = "\n".join([iv_doc.page_content for iv_doc in iv_documents_doc])
 
@@ -655,19 +687,8 @@ def generate_question(state: InterviewState) -> InterviewState:
     strategy = state.get("current_strategy", "")
     resume_summary = state.get("resume_summary", "")
     keywords = ", ".join(state.get("resume_keywords", []))
-
-    '''
-    # 최근 평가 참고 (없을 경우 빈 문자열)
-    last_eval = evaluations[-1] if evaluations else {}
-    overall = last_eval.get("overall", "")
-    rationale = "; ".join([
-        f"{k}: {v.get('등급', '')}({v.get('근거', '')})"
-        for k, v in last_eval.get("criteria", {}).items()
-    ]) if last_eval.get("criteria") else ""
-    '''
-
-    # 최근 평가 가져오기
-    evaluations = state.get("evaluation", [])
+    company = state.get("company") or DEFAULT_COMPANY
+    position = state.get("position") or DEFAULT_POSITION
 
     qs = state.get("question_strategy", {})
     seq = list(qs.keys())
@@ -675,27 +696,31 @@ def generate_question(state: InterviewState) -> InterviewState:
     ev = state.get("evaluation", {})
     last_eval = ev.get(cur, {})
 
-    # 부족한 항목 추출 (안전하게)
+    # 부족한 항목 추출
+    # evaluation[영역] 은 평면 딕셔너리이므로 한 단계 더 중첩된 구조를 기대하면 안 된다.
+    # CRITERIA 4개 키만 직접 읽어서 0점인 지표 이름을 모은다.
+    # (_n, _sum_*, question, answer 같은 메타 키는 자연히 제외됨)
     weak_points = []
     rationale_parts = []
 
     if isinstance(last_eval, dict):
-        for category, metrics in last_eval.items():
-            if isinstance(metrics, dict):
-                # 0인 항목만 추출
-                zero_keys = [k for k, v in metrics.items() if v == 0]
-                if zero_keys:
-                    weak_points.append({category: zero_keys})
-                # rationale 문자열 생성
-                metric_text = ", ".join([f"{k}: {v}" for k, v in metrics.items()])
-                rationale_parts.append(f"{category} - {metric_text}")
+        for name in CRITERIA:
+            if name not in last_eval:
+                continue
+            try:
+                score = int(last_eval[name])
+            except (TypeError, ValueError):
+                continue
+            if score == 0:
+                weak_points.append(name)
+            rationale_parts.append(f"{name}: {score}")
 
-    rationale = "; ".join(rationale_parts)
+    rationale = f"{cur} - " + ", ".join(rationale_parts) if rationale_parts else ""
 
 
     # ================================
-    # KT 핵심가치 확인 (similarity_search)
-    docs = vectordb.similarity_search("KT 핵심가치"+answer, k=10)
+    # 기업 핵심가치·인재상 참고자료 검색 (similarity_search)
+    docs = vectordb.similarity_search(f"{company} 핵심가치 인재상 " + answer, k=10)
     unique_docs = []
     seen_texts = set()
     for doc in docs:
@@ -706,8 +731,7 @@ def generate_question(state: InterviewState) -> InterviewState:
     # 최대 3개만 사용
     unique_docs = unique_docs[:3]
 
-    kt_values_response = " ".join([doc.page_content for doc in unique_docs])
-    kt_prompt_str = f" 답변과 관련된 KT 핵심가치: {kt_values_response}\n"
+    reference_values = " ".join([doc.page_content for doc in unique_docs])
 
     # ================================
     # 예시질문 (similarity_search)
@@ -722,23 +746,22 @@ def generate_question(state: InterviewState) -> InterviewState:
     # 최대 3개만 사용
     unique_docs2 = unique_docs2[:3]
 
-    kt_values_response2 = " ".join([doc2.page_content for doc2 in unique_docs2])
-    kt_prompt_str2 = f"지원자 답변과 관련된 KT 예상 질문: {kt_values_response2}\n"
+    reference_questions = " ".join([doc2.page_content for doc2 in unique_docs2])
     # ================================
 
 
     # 프롬프트 구성
     prompt = ChatPromptTemplate.from_messages([
         ("system",
-        "당신은 인사담당 면접관입니다. "
+        "당신은 {company}의 {position} 직무 인사담당 면접관입니다. "
         "지원자의 이전 답변을 기반으로 사고력, 문제 해결 방식, 기술적 깊이를 더 파악할 수 있는 '심화 질문'을 작성하세요. "
         "조건:\n"
         "- 한 문장으로, 자연스러운 공손체로 작성 ('~하시겠어요?', '~설명해주세요.')\n"
         "- 이전 질문과 답변 맥락을 유지하되, 새로운 관점이나 구체적 근거를 끌어낼 수 있도록 구성\n"
         "- JSON 형태로만 출력\n"
-        "- kt_prompt_str과 이전 지원자 답변의 연관성이 충분하지 않으면 그냥 weak_points에 있는 부족한 항목을 중심으로만 질문해주세요.\n"
-        "- kt_prompt_str과 이전 지원자 답변의 연관성이 충분하면, weak_points2를 적극 참고하여 질문해주세요.\n"
-        "- 모든 질문 내용은 반드시 weak_points에 있는 부족한 항목을 중심으로 만드세요\n"),
+        "- 모든 질문 내용은 반드시 '부족한 항목'에 있는 지표를 보강하도록 만드세요.\n"
+        "- '참고 자료'가 지원자 답변과 충분히 관련 있을 때만 활용하고, 관련이 없으면 무시한 채 "
+        "'부족한 항목'만 중심으로 질문하세요.\n"),
 
         ("human",
         "이력서 요약: {resume_summary}\n"
@@ -747,8 +770,9 @@ def generate_question(state: InterviewState) -> InterviewState:
         "이전 질문: {question}\n"
         "지원자 답변: {answer}\n"
         "최근 평가에서 부족한 항목: {weak_points}\n"
-        "KT 핵심역량: {kt_prompt_str}\\n"
-        "KT 예상 질문: {kt_prompt_str2}\\n"
+        "최근 평가 상세: {rationale}\n"
+        "참고 자료(기업 핵심가치·인재상): {reference_values}\n"
+        "참고 자료(예상 질문): {reference_questions}\n"
         "→ 위 정보를 바탕으로 한 단계 더 깊은 심화 면접 질문을 생성하세요.")
     ])
 
@@ -761,11 +785,12 @@ def generate_question(state: InterviewState) -> InterviewState:
         "answer": answer,
         "rationale": rationale,
         "weak_points": weak_points,
-        "kt_prompt_str": kt_prompt_str,
-        "kt_prompt_str2": kt_prompt_str2
+        "reference_values": reference_values,
+        "reference_questions": reference_questions,
+        "company": company,
+        "position": position,
     })
 
-    # return 코드는 제공합니다.
     return {
         **state,
         "current_question": response.question.strip(),
@@ -775,7 +800,7 @@ def generate_question(state: InterviewState) -> InterviewState:
 
 #  최종평가 체인
 final_eval_prompt = ChatPromptTemplate.from_template("""
-당신은 기술 면접관입니다.
+당신은 {company}의 {position} 직무 면접관입니다.
 다음은 면접 질문별 요약과 평균 점수입니다.
 
 평균 점수: {avg_score}/10
@@ -862,7 +887,9 @@ def summarize_interview(state: dict):
 
         final_feedback = final_eval_chain.invoke({
             "avg_score": avg_score,
-            "summary_for_llm": "\n".join(summary_for_llm_lines)
+            "summary_for_llm": "\n".join(summary_for_llm_lines),
+            "company": state.get("company") or DEFAULT_COMPANY,
+            "position": state.get("position") or DEFAULT_POSITION,
         })
         report += f" {final_feedback}\n"
     else:
@@ -887,13 +914,13 @@ def route_next(state: InterviewState) -> Literal["generate", "change_strategy", 
         return "generate"
 
 
-# 내부 노드: 사용자 답변을 state에 반영 (임시 키 'incoming_answer' 사용)??
+# 내부 노드: 그래프 진입 시 들어온 사용자 답변을 정규화(공백 제거)해서 state에 반영.
+# 다음 노드인 evaluate_answer()가 current_answer를 읽으므로 이 키를 제거하면 안 된다.
+# (LangGraph는 반환 dict에 없는 키를 삭제하지 않고 이전 값을 유지하므로 그래프 경로에서는
+#  증상이 드러나지 않지만, 노드를 직접 이어 붙이면 빈 문자열이 평가된다.)
 def _update_answer_node(state: InterviewState) -> InterviewState:
     user_answer = state.get("current_answer", "")
-    new_state = update_current_answer(state, user_answer)
-    if "current_answer" in new_state:
-        new_state.pop("current_answer")
-    return new_state
+    return update_current_answer(state, user_answer)
 
 
 # 그래프 정의 시작

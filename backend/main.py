@@ -1,5 +1,7 @@
 import os
+import copy
 import uuid
+import logging
 import tempfile
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Form
@@ -17,21 +19,18 @@ from auth import (
     get_current_user,
 )
 
-from core.interview_logic import extract_text_from_file
-from core.interview_logic import preProcessing_Interview_from_text
-
-# 서버 시작 시 테이블이 없으면 자동 생성 (이미 있으면 넘어감)
+# 서버 시작 시 테이블이 없으면 자동 생성
 Base.metadata.create_all(bind=engine)
 
+# 노드 함수를 하나씩 가져와 직접 호출하던 방식을 그만두고, 컴파일된 그래프 하나만 쓴다.
+# 진행 순서와 분기 조건은 interview_logic.py 의 그래프 정의에만 존재한다.
 from core.interview_logic import (
-    preProcessing_Interview,
-    update_current_answer,
-    evaluate_answer,
-    decide_next_step,
-    generate_question,
-    change_strategy,
-    summarize_interview,
+    extract_text_from_file,
+    preProcessing_Interview_from_text,
+    graph,
 )
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="AI Interview Bot API")
 
@@ -78,8 +77,19 @@ def start_interview(
     if not resume:
         raise HTTPException(status_code=404, detail="이력서를 찾을 수 없습니다.")
 
-    # 저장된 이력서 텍스트로 면접 준비
-    state = preProcessing_Interview_from_text(resume.content)
+    # 저장된 이력서 텍스트 + 지원 기업/직무로 면접 준비
+    try:
+        state = preProcessing_Interview_from_text(
+            resume.content,
+            company=resume.company or "",
+            position=resume.position or "",
+        )
+    except Exception:
+        logger.exception("면접 준비 실패 (resume_id=%s)", payload.resume_id)
+        raise HTTPException(
+            status_code=503,
+            detail="면접 준비 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.",
+        )
 
     session_id = str(uuid.uuid4())
     sessions[session_id] = {"state": state, "ended": False}
@@ -99,17 +109,21 @@ async def submit_answer(payload: AnswerRequest):
     if session["ended"]:
         raise HTTPException(status_code=400, detail="이미 종료된 인터뷰입니다.")
 
-    state = update_current_answer(session["state"], payload.answer)
-    state = evaluate_answer(state)
-    state = decide_next_step(state)
+    # 그래프 노드들이 evaluation/conversation 을 in-place 로 수정하므로,
+    # 복사본을 넘겨서 중간에 실패해도 세션이 반쯤 갱신된 상태로 남지 않게 한다.
+    # (실패 시 사용자는 같은 답변으로 그대로 재시도할 수 있다)
+    state = copy.deepcopy(session["state"])
+    state["current_answer"] = payload.answer
 
-    next_step = state.get("next_step", "")
-    if next_step == "generate":
-        state = generate_question(state)
-    elif next_step == "change_strategy":
-        state = change_strategy(state)
-    elif next_step == "summarize":
-        state = summarize_interview(state)
+    # 평가 → 분기 → 다음 질문/리포트까지 그래프가 한 번에 처리한다.
+    try:
+        state = graph.invoke(state)
+    except Exception:
+        logger.exception("답변 처리 실패 (session_id=%s)", payload.session_id)
+        raise HTTPException(
+            status_code=503,
+            detail="답변 평가 중 오류가 발생했습니다. 답변은 저장되지 않았으니 잠시 후 다시 제출해 주세요.",
+        )
 
     session["state"] = state
 
@@ -169,6 +183,8 @@ def read_me(current_user: User = Depends(get_current_user)):
 @app.post("/api/resumes", response_model=schemas.ResumeOut)
 async def upload_resume(
     title: str = Form(...),
+    company: str = Form(...),   # 지원 기업 (면접관 페르소나에 사용)
+    position: str = Form(...),  # 지원 직무
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),  # 로그인 필수
@@ -187,13 +203,21 @@ async def upload_resume(
         os.remove(tmp_path)
 
     # DB에 저장 (현재 로그인한 사용자의 이력서로)
-    resume = Resume(title=title, content=content, owner_id=current_user.id)
+    resume = Resume(
+        title=title,
+        content=content,
+        company=company.strip(),
+        position=position.strip(),
+        owner_id=current_user.id,
+    )
     db.add(resume)
     db.commit()
     db.refresh(resume)
     return schemas.ResumeOut(
         id=resume.id,
         title=resume.title,
+        company=resume.company,
+        position=resume.position,
         created_at=str(resume.created_at),
     )
 
@@ -206,7 +230,13 @@ def list_resumes(
 ):
     resumes = db.query(Resume).filter(Resume.owner_id == current_user.id).all()
     return [
-        schemas.ResumeOut(id=r.id, title=r.title, created_at=str(r.created_at))
+        schemas.ResumeOut(
+            id=r.id,
+            title=r.title,
+            company=r.company,
+            position=r.position,
+            created_at=str(r.created_at),
+        )
         for r in resumes
     ]
 
