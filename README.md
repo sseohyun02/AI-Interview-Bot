@@ -17,7 +17,13 @@ LangGraph로 답변 평가와 면접 진행 분기를 연결하고, 면접 세�
 
 ## 서비스 화면
 
-<!-- 회원가입·로그인, 이력서 등록, 면접 진행, 최종 피드백 화면 캡처를 추가하세요. -->
+| 로그인 | 면접 준비 |
+|:---:|:---:|
+| <img width="480" alt="로그인 화면" src="https://github.com/user-attachments/assets/a41d3f4b-7e0c-41d1-9c08-c947d8561363" /> | <img width="480" alt="면접 준비 화면" src="https://github.com/user-attachments/assets/625c4d2f-71a2-49a4-94bb-edca1d76b1ee" /> |
+
+| AI 면접 진행 | 면접 분석 리포트 |
+|:---:|:---:|
+| <img width="480" alt="AI 면접 진행 화면" src="https://github.com/user-attachments/assets/6ba809b2-2b23-4e26-bc5d-0a2e09f63a50" /> | <img width="480" alt="면접 분석 리포트" src="https://github.com/user-attachments/assets/fde20fb3-287e-4ec7-af93-0ef45305b4a7" /> |
 
 ## 시스템 아키텍처
 
