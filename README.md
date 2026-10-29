@@ -12,7 +12,7 @@ LangGraph로 답변 평가와 면접 진행 분기를 연결하고, 면접 세�
 2. **이력서 업로드 및 관리**: PDF·DOCX에서 텍스트를 추출하고, 지원 기업·직무와 함께 저장합니다. 등록한 이력서는 조회·삭제할 수 있습니다.
 3. **이력서 기반 질문 생성**: 이력서 요약과 핵심 키워드를 바탕으로 경험·동기·논리 분야의 질문을 구성합니다.
 4. **답변 평가 및 면접 진행 분기**: 구체성·일관성·적합성·논리성을 0/1로 평가하고, 분야별 누적 평균과 심화 질문 횟수에 따라 추가 질문·분야 전환·종료를 결정합니다.
-5. **참고자료 기반 심화 질문**: 답변과 관련된 인재상·예상 질문 자료를 Chroma에서 검색해 보완이 필요한 항목을 묻는 질문을 생성합니다.
+5. **참고자료 기반 심화 질문**: 현재 질문·답변과 부족한 평가 항목을 바탕으로 Chroma에 저장된 면접 질문 예시를 검색하고, 이를 참고해 심화 질문을 생성합니다.
 6. **최종 피드백 보고서**: 분야별 항목 평균, 종합 점수, 강점과 개선 항목, 종합 의견을 텍스트 보고서로 제공합니다.
 
 ## 서비스 화면
@@ -61,7 +61,7 @@ flowchart TD
     B -->|이력서 분석 · 초기 질문 구성| G
 ```
 
-면접 상태는 서버 메모리에 저장되므로 서버 재시작 시 초기화됩니다. 참고자료는 기본적으로 `backend/assets/`의 KT 인재상·면접 자료를 사용하며, 환경 변수로 교체할 수 있습니다.
+면접 상태는 서버 메모리에 저장되어 서버 재시작 시 초기화됩니다. 참고 질문은 별도 스크립트에서 한국어 임베딩 모델로 벡터화해 로컬 Chroma에 저장하며, 면접 중에는 심화 질문 생성 시 검색합니다.
 
 ## 기술 스택
 
@@ -69,8 +69,8 @@ flowchart TD
 |:---:|---|
 | **Frontend** | ![React](https://img.shields.io/badge/React-61DAFB?style=flat-square&logo=react&logoColor=white) ![JavaScript](https://img.shields.io/badge/JavaScript-F7DF1E?style=flat-square&logo=javascript&logoColor=black) ![Vite](https://img.shields.io/badge/Vite-646CFF?style=flat-square&logo=vite&logoColor=white) |
 | **Backend** | ![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white) ![Python](https://img.shields.io/badge/Python-3776AB?style=flat-square&logo=python&logoColor=white) ![SQLAlchemy](https://img.shields.io/badge/SQLAlchemy-D71F00?style=flat-square&logo=sqlalchemy&logoColor=white) |
-| **AI / RAG** | ![LangChain](https://img.shields.io/badge/LangChain-1C3C3C?style=flat-square&logo=langchain&logoColor=white) ![LangGraph](https://img.shields.io/badge/LangGraph-1C3C3C?style=flat-square) ![Gemini](https://img.shields.io/badge/Gemini-8E75B2?style=flat-square&logo=google&logoColor=white) ![Gemini Embedding](https://img.shields.io/badge/gemini--embedding--001-4285F4?style=flat-square) |
-| **문서 처리** | ![PyMuPDF](https://img.shields.io/badge/PyMuPDF-555555?style=flat-square) ![python-docx](https://img.shields.io/badge/python--docx-555555?style=flat-square) ![Unstructured](https://img.shields.io/badge/Unstructured-555555?style=flat-square) |
+| **AI / RAG** | LangChain · LangGraph · Gemini API (`gemini-3.5-flash-lite`) · Sentence Transformers (`jhgan/ko-sroberta-multitask`) |
+| **문서 처리** | PyMuPDF · python-docx |
 | **DB** | ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?style=flat-square&logo=postgresql&logoColor=white) ![Chroma](https://img.shields.io/badge/Chroma-555555?style=flat-square) |
 | **인증** | ![JWT](https://img.shields.io/badge/JWT-000000?style=flat-square&logo=jsonwebtokens&logoColor=white) ![bcrypt](https://img.shields.io/badge/bcrypt-555555?style=flat-square) |
 
@@ -81,17 +81,20 @@ AI-Interview-Bot/
 ├── backend/                         # FastAPI 백엔드
 │   ├── main.py                      # 회원·이력서·면접 API 및 세션 관리
 │   ├── auth.py                      # 비밀번호 해싱 및 JWT 인증
-│   ├── database.py                  # DB 연결 및 세션 설정
+│   ├── database.py                  # PostgreSQL 연결 및 세션 설정
 │   ├── models.py                    # 회원·이력서 DB 모델
 │   ├── schemas.py                   # 회원·이력서 API 스키마
-│   ├── init_db.py                   # DB 테이블 생성 스크립트
-│   ├── requirements.txt             # Python 의존성
-│   ├── test_flow.py                 # 면접 흐름 확인 스크립트
+│   ├── init_db.py                   # PostgreSQL 테이블 생성 스크립트
+│   ├── build_interview_db.py        # 참고 질문 추출·임베딩·Chroma 적재
+│   ├── requirements.txt            # Python 의존성
+│   ├── test_flow.py                # API 흐름 확인 스크립트
 │   ├── core/
-│   │   └── interview_logic.py       # 이력서 분석·검색·평가·LangGraph 흐름
-│   └── assets/
-│       ├── KT.docx                  # 인재상·핵심가치 참고자료
-│       └── KT_interview.docx        # 예상 면접 질문 참고자료
+│   │   └── interview_logic.py      # 이력서 분석·검색·평가·LangGraph 흐름
+│   ├── assets/
+│   │   └── interview_questions.pdf # 별도 준비하는 참고자료 (Git 제외)
+│   └── data/                       # 로컬 생성 데이터 (Git 제외)
+│       ├── interview_questions_preview.json # 추출 질문 검토용
+│       └── chroma_interview_ko/     # Chroma DB 저장 폴더
 │
 └── frontend/                        # React + Vite 프론트엔드
     ├── package.json                 # 프론트엔드 의존성 및 실행 명령
@@ -132,15 +135,41 @@ cd AI-Interview-Bot/backend
 python -m pip install -r requirements.txt
 ```
 
-`backend/.env` 파일을 만들고 아래 환경 변수를 설정합니다.
+`backend/.env` 파일을 만들고 아래 ‘환경 변수 설정’ 항목의 값을 입력합니다.
+PostgreSQL 서버를 실행하고, 접속할 데이터베이스를 미리 생성해야 합니다.
+
+#### 면접 참고자료 DB 구축
+
+참고자료 PDF와 생성된 데이터는 저장소에 포함하지 않습니다.
+사용할 면접 질문 PDF를 `backend/assets/interview_questions.pdf`에 준비합니다.
+
+`backend` 폴더에서 질문을 추출합니다.
 
 ```bash
-# 환경 변수 설정 후 서버 실행
+python build_interview_db.py
+```
+
+생성된 `data/interview_questions_preview.json`에서 질문 누락이나 불필요한 문구를 확인·수정한 뒤, 임베딩과 적재를 실행합니다.
+
+```bash
+python build_interview_db.py --build
+```
+
+한국어 임베딩 모델은 최초 실행 시 다운로드되며 로컬 CPU에서 실행됩니다.
+DB는 `backend/data/chroma_interview_ko/`에 저장됩니다.
+
+같은 내용으로 재실행하면 이미 저장된 텍스트는 건너뜁니다.
+원본에서 삭제하거나 수정한 질문의 기존 DB 항목은 자동 삭제되지 않습니다.
+
+#### API 서버 실행
+
+```bash
 python -m uvicorn main:app --reload --host 0.0.0.0 --port 8080
 # API 문서: http://localhost:8080/docs
 ```
 
-서버 시작 시 회원·이력서 테이블을 자동 생성하고, 참고 문서를 임베딩해 Chroma 검색 인덱스를 구성합니다.
+서버 시작 시 회원·이력서 테이블이 없으면 생성합니다.
+심화 질문 생성 시 미리 구축한 Chroma DB와 로컬 임베딩 모델을 불러와 검색합니다.
 
 ### 프론트엔드 실행
 
@@ -176,11 +205,6 @@ DATABASE_URL=postgresql+psycopg://your-db-user:your-db-password@localhost:5432/y
 
 # JWT 서명 키
 SECRET_KEY=your-random-secret-key
-
-# 참고자료 경로 (선택)
-# 미설정 시 backend/assets/의 기본 문서 사용
-# VALUES_DOC_PATH=/absolute/path/to/company_values.docx
-# QUESTIONS_DOC_PATH=/absolute/path/to/interview_questions.docx
 ```
 
 </details>
