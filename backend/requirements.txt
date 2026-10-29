@@ -20,3 +20,6 @@ bcrypt
 python-jose[cryptography]
 python-dotenv
 pydantic[email]
+langchain-huggingface
+sentence-transformers
+langchain-chroma

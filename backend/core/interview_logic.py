@@ -18,8 +18,13 @@ from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.output_parsers import StrOutputParser, CommaSeparatedListOutputParser
 from langchain_core.prompts import PromptTemplate, ChatPromptTemplate
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
-from langchain_community.vectorstores import Chroma
+
+from functools import lru_cache
+from pathlib import Path
+
+import chromadb
+from langchain_chroma import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
 
 from langgraph.graph import StateGraph, START, END
 from typing import TypedDict, List, Dict
@@ -27,9 +32,6 @@ from pydantic import BaseModel, Field
 from typing import List
 from tabulate import tabulate
 import tempfile
-
-from langchain_community.document_loaders import UnstructuredWordDocumentLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 def extract_text_from_file(file_path: str) -> str:
   ext = os.path.splitext(file_path)[1].lower()
@@ -78,7 +80,7 @@ class ResumeAnalysis(BaseModel):
     keywords: List[str] = Field(..., description="이력서의 핵심 역량 및 키워드 목록")
 
 # llm 모델 정의
-llm = ChatGoogleGenerativeAI(model="gemini-flash-latest")
+llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash-lite")
 
 def analyze_resume(state: InterviewState) -> InterviewState:
   '''
@@ -363,16 +365,31 @@ def evaluate_answer(state: Dict) -> Dict:
     # 2. LLM 평가 (구조화 출력)
     # -------------------------------------------------
     prompt = ChatPromptTemplate.from_messages([
-        ("system",
-         "너는 {company}의 {position} 직무 면접관이다. "
-         "다음 4개 항목을 **서로 독립적으로** 0 또는 1로 채점하라. "
-         "하나의 항목이 1이라고 해서 다른 항목도 반드시 1일 필요는 없다. "
-         "각 항목은 score(0/1)와 rationale(1~2문장)만 포함한다.\n"
-         "- 구체성: 수치·사실·사례·역할·과정·결과가 명확(1) / 추상적·근거부족(0)\n"
-         "- 일관성: 주장-근거-사례 흐름이 자연(1) / 모순·단절(0)\n"
-         "- 적합성: 지원 기업/직무/질문 의도에 직접 부합(1) / 일반론·동문서답(0)\n"
-         "- 논리성: 원인→행동→결과가 논리 전개(1) / 비약·누락(0)"
-        ),
+        ("system", """
+        너는 {company}의 {position} 직무 면접관이다.
+        다음 네 항목을 서로 독립적으로 0 또는 1로 채점하라.
+
+        평가 공통 지침:
+        - 먼저 질문에서 무엇을 설명하거나 판단하도록 요구했는지 파악한다.
+        - 관련 주제를 언급했더라도 질문의 핵심 요구에 답하지 않았다면 적합성은 0점으로 평가한다.
+        - 구체성과 논리성은 질문이 요구한 설명의 범위 안에서 평가한다. 질문과 무관한 상세 설명이나 답변의 길이만으로 점수를 주지 않는다.
+        - 방법을 물었는데 결과만 답했다면, 행동·방법의 구체성이 충족됐다고 판단하지 않는다.
+        - 각 항목은 독립적으로 평가한다. 적합성이 0점이라는 이유로 나머지 항목을 일괄 0점 처리하지 않는다.
+        - 질문이 요구하지 않은 정보가 없다는 이유로 감점하지 않는다. 모든 답변에 수치나 상황·행동·결과 전체를 요구하지 않는다.
+        - 현재 답변에 명시된 내용만 채점 근거로 사용한다. 이력서 요약은 배경 이해에만 사용하고, 빠진 설명을 이력서나 일반 지식으로 보충하지 않는다.
+        - 각 항목의 1점 조건이 확인될 때만 1점을 부여한다. 확인에 필요한 설명이 부족하면 0점을 부여한다.
+        - 제공되지 않은 기업 인재상이나 채용 기준을 추정하지 않는다.
+
+        평가 항목:
+        - 구체성: 질문에서 요구한 경험·행동·방법·이유 등을 실제 내용을 파악할 수 있을 정도로 설명하면 1. 행동이나 방법을 묻는 질문에서는 무엇을 대상으로 어떻게 했는지 확인한다. '분석했다', '개선했다', '협업했다'처럼 활동 이름만 제시하거나 본인의 역할을 물었는데 팀 전체 성과만 제시하면 0. 수치나 기술명만으로 1점을 주지 않으며, 수치가 없어도 필요한 설명이 구체적이면 1점을 줄 수 있다.
+        - 일관성: 답변 안의 진술이 서로 모순되지 않으면 1. 동일한 대상·시점·조건에 대해 양립할 수 없는 진술이 있으면 0. 시간 경과나 행동에 따른 변화는 그 자체로 모순으로 판단하지 않는다.
+        - 적합성: 질문의 핵심 요구에 직접 답하면 1. 관련 주제만 언급하거나 핵심 요구에 답하지 않으면 0. 직무 관련성을 묻는 질문에서는 입력된 지원 직무와의 연결도 확인한다.
+        - 논리성: 질문에서 요구한 주장·판단·행동을 뒷받침하는 이유나 근거가 있고, 그 연결이 설명되면 1. 근거 없이 결론만 제시하거나 결과가 좋았다는 말로 방법의 타당성을 대신하면 0. 설명되지 않은 연결 관계를 추측해서 보완하지 않는다. 인과관계를 묻는 질문에서는 행동과 결과를 연결하는 근거도 확인한다.
+
+        출력:
+        각 항목은 score(0 또는 1)와 rationale(1~2문장)로 반환한다.
+        rationale에는 질문의 요구와 답변에서 충족하거나 누락한 내용을 구체적으로 명시한다.
+        """),
 
         # Few-shot #1 (양호)
         ("human",
@@ -396,7 +413,7 @@ def evaluate_answer(state: Dict) -> Dict:
         ),
         ("ai",
          '{{"specificity":{{"score":0,"rationale":"수치/방법/역할 부재"}},'
-         '"consistency":{{"score":0,"rationale":"목표-근거-사례 흐름 불명확"}},'
+         '"consistency":{{"score":1,"rationale":"답변 내부에 상충하는 진술은 없음"}},'
          '"fit":{{"score":0,"rationale":"질문과 직접 연결 부족"}},'
          '"logic":{{"score":0,"rationale":"원인/과정/결과 서술 없음"}}}}'
         ),
@@ -418,23 +435,6 @@ def evaluate_answer(state: Dict) -> Dict:
         "position": position,
     })
 
-    # -------------------------------------------------
-    # 3. 일관성 검증 & 강제 교체 로직
-    # -------------------------------------------------
-    # (1) LLM이 1을 줬지만 실제 모순이 있는 경우 0으로 강제
-    if result.consistency.score == 1:
-        # 간단한 휴리스틱: 질문·답변에 서로 반대되는 키워드가 있으면 0
-        q_lower = question.lower()
-        a_lower = answer.lower()
-        contradict_pairs = [
-            ("아니오", "예"), ("없다", "있다"), ("실패", "성공"), ("낮다", "높다")
-        ]
-        if any(p in q_lower and n in a_lower or n in q_lower and p in a_lower
-               for p, n in contradict_pairs):
-            result.consistency.score = 0
-            result.consistency.rationale = "질문과 답변에 상반되는 표현이 있어 흐름이 단절됨"
-
-    # (2) LLM이 0을 줬다면 그대로 유지 (기본 1점에서 내려가지 않음)
 
     # -------------------------------------------------
     # 4. 최종 점수 저장 (조건2: 최신 덮어쓰기)
@@ -489,12 +489,17 @@ def evaluate_answer(state: Dict) -> Dict:
 
 def decide_next_step(state: InterviewState) -> InterviewState:
     """
-    규칙 기반 진행 제어 (evaluation = {분야:{지표:점수}}):
-    - 현재 분야 점수 = evaluation[cur]의 값 합 / (지표수 * max_per_dim)
-    - score >= threshold → 다음 분야(next_question) 전환 + 예시 질문 랜덤 선택
-    - score < threshold → 동일 분야 심화(additional_question), deep_counts[cur] += 1
-    - deep_counts[cur] > 3 → 강제 다음 분야 전환(next_question)
-    - 마지막 분야에서 score >= threshold → end
+    현재 분야의 누적 평균 점수와 심화 질문 횟수로 다음 단계를 결정한다.
+
+    - 누적 평균 = 현재 분야의 누적 점수 합 / (답변 수 * 4)
+    - 누적 평균이 0.75 이상이거나 심화 질문을 이미 2회 진행한 경우:
+      다음 분야가 있으면 current_strategy를 변경하고
+      next_step을 "change_strategy"로 설정한다.
+      마지막 분야이면 next_step을 "summarize"로 설정한다.
+    - 그 외에는 심화 질문 횟수를 1 증가시키고
+      next_step을 "generate"로 설정한다.
+
+    다음 질문 선택과 리포트 생성은 각 후속 노드에서 수행한다.
     """
     # 이 함수 내부에서만 쓰는 상수
     threshold = 0.75          # 통과 기준 (75%)
@@ -606,82 +611,53 @@ def change_strategy(state: InterviewState) -> InterviewState:
         "next_step": ""  # 이후 루프에서 질문 제시 → 답변 입력 → 평가 단계로 이동
     }
 
-# 참고자료 문서 경로.
-# 현재 assets 에는 KT 자료가 들어 있으나 추후 범용 면접/평가 자료로 교체할 예정이다.
-# 교체 시 코드를 고치지 않도록 환경변수로 덮어쓸 수 있게 해 둔다.
-ASSETS_DIR = os.path.join(os.path.dirname(__file__), "..", "assets")
-VALUES_DOC_PATH = os.environ.get(
-    "VALUES_DOC_PATH", os.path.join(ASSETS_DIR, "KT.docx")
-)       # 핵심가치·인재상 자료
-QUESTIONS_DOC_PATH = os.environ.get(
-    "QUESTIONS_DOC_PATH", os.path.join(ASSETS_DIR, "KT_interview.docx")
-)       # 예상 질문 자료
-
-# 핵심가치·인재상 참고자료
-
-# 1. 문서 로드
-docx_loader = UnstructuredWordDocumentLoader(VALUES_DOC_PATH)
-documents_doc = docx_loader.load()
-full_text = "\n".join([doc.page_content for doc in documents_doc])
-
-# 2. 텍스트 분할: RecursiveCharacterTextSplitter 사용
-text_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=40,           # 청크 사이즈를 늘려 문맥 보존
-    chunk_overlap=0,         # 오버랩을 주어 의미 연결
-    separators=["\n\n", "\n"] # 다양한 구분자를 사용하여 더 의미 단위로 분할
+# 문서 적재 스크립트에서도 같은 설정을 사용해야 한다.
+EMBEDDING_MODEL_NAME = "jhgan/ko-sroberta-multitask"
+CHROMA_DIR = (
+    Path(__file__).resolve().parents[1]
+    / "data"
+    / "chroma_interview_ko"
 )
-
-split_texts = text_splitter.split_text(full_text)
-
-# 3. 짧은 청크 제거 (Clean-up 과정)
-# 너무 짧은 텍스트(예: 제목 한 줄, 띄어쓰기 한 줄 등)는 벡터 DB의 검색 정확도를 떨어뜨린다.
-# 실제 핵심 내용이 담긴 청크만 남긴다. (최소 20자 이상으로 설정)
-cleaned_split_texts = [text for text in split_texts if len(text.strip()) > 20]
-
-print(f"총 {len(split_texts)}개 청크 중 {len(cleaned_split_texts)}개 유효 청크 사용")
-
-# 4. 임베딩 & Chroma DB 생성 (유효 청크만 사용)
-embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
-# Chroma DB는 동일한 디렉토리에 생성되므로, 실행할 때마다 새로 생성되도록 처리
-# (실제 환경에서는 persist_directory를 지정하여 캐시 문제를 방지하는 것이 좋음)
-vectordb = Chroma.from_texts(cleaned_split_texts, embeddings)
-
-# 예상 질문 참고자료
-
-# 1. 문서 로드
-iv_docx_loader = UnstructuredWordDocumentLoader(QUESTIONS_DOC_PATH)
-iv_documents_doc = iv_docx_loader.load()
-iv_full_text = "\n".join([iv_doc.page_content for iv_doc in iv_documents_doc])
-
-# 2. 텍스트 분할: RecursiveCharacterTextSplitter 사용
-text_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=100,           # 청크 사이즈를 늘려 문맥 보존
-    chunk_overlap=50,         # 오버랩을 주어 의미 연결
-    separators=["\n\n", "\n", " "] # 다양한 구분자를 사용하여 더 의미 단위로 분할
-)
+CHROMA_COLLECTION_NAME = "interview_questions"
 
 
-split_texts2 = text_splitter.split_text(iv_full_text)
+@lru_cache(maxsize=1)
+def get_interview_vectordb():
+    if not CHROMA_DIR.is_dir():
+        raise RuntimeError(
+            f"면접 질문 DB가 없습니다. 먼저 자료를 적재하세요: {CHROMA_DIR}"
+        )
 
-# 3. 짧은 청크 제거 (Clean-up 과정)
-# 너무 짧은 텍스트(예: 제목 한 줄, 띄어쓰기 한 줄 등)는 벡터 DB의 검색 정확도를 떨어뜨린다.
-# 실제 핵심 내용이 담긴 청크만 남긴다. (최소 20자 이상으로 설정)
-cleaned_split_texts2 = [text for text in split_texts2 if len(text.strip()) > 20]
+    client = chromadb.PersistentClient(path=str(CHROMA_DIR))
 
-print(f"총 {len(split_texts2)}개 청크 중 {len(cleaned_split_texts2)}개 유효 청크 사용")
+    # 존재하는 컬렉션만 읽는다.
+    # 컬렉션명 오류를 숨기기 위해 빈 컬렉션을 새로 만들지 않는다.
+    collection = client.get_collection(
+        name=CHROMA_COLLECTION_NAME
+    )
 
-# 4. 임베딩 & Chroma DB 생성 (유효 청크만 사용)
-embeddings2 = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
-# Chroma DB는 동일한 디렉토리에 생성되므로, 실행할 때마다 새로 생성되도록 처리
-# (실제 환경에서는 persist_directory를 지정하여 캐시 문제를 방지하는 것이 좋음)
-vectordb2 = Chroma.from_texts(cleaned_split_texts2, embeddings2)
+    if collection.count() == 0:
+        raise RuntimeError("면접 질문 DB에 저장된 자료가 없습니다.")
+
+    embeddings = HuggingFaceEmbeddings(
+        model_name=EMBEDDING_MODEL_NAME,
+        model_kwargs={"device": "cpu"},
+        encode_kwargs={"normalize_embeddings": True},
+    )
+
+    return Chroma(
+        client=client,
+        collection_name=CHROMA_COLLECTION_NAME,
+        embedding_function=embeddings,
+    )
 
 # LLM 출력 스키마
 class DeepQuestion(BaseModel):
     question: str = Field(..., description="지원자의 사고력, 문제해결력, 기술적 깊이를 검증할 수 있는 심화 질문")
 
 def generate_question(state: InterviewState) -> InterviewState:
-    """이전 답변과 평가를 바탕으로 심화 질문을 생성"""
+    """답변 평가 결과와 국내 면접 질문 자료를 참고해 심화 질문을 생성한다."""
+
     question = state.get("current_question", "")
     answer = state.get("current_answer", "")
     strategy = state.get("current_strategy", "")
@@ -690,113 +666,109 @@ def generate_question(state: InterviewState) -> InterviewState:
     company = state.get("company") or DEFAULT_COMPANY
     position = state.get("position") or DEFAULT_POSITION
 
-    qs = state.get("question_strategy", {})
-    seq = list(qs.keys())
-    cur = state.get("current_strategy", (seq[0] if seq else ""))
-    ev = state.get("evaluation", {})
-    last_eval = ev.get(cur, {})
+    # 가장 최근 답변에서 0점을 받은 평가 항목을 찾는다.
+    evaluations = state.get("evaluation", {})
+    last_eval = evaluations.get(strategy, {})
 
-    # 부족한 항목 추출
-    # evaluation[영역] 은 평면 딕셔너리이므로 한 단계 더 중첩된 구조를 기대하면 안 된다.
-    # CRITERIA 4개 키만 직접 읽어서 0점인 지표 이름을 모은다.
-    # (_n, _sum_*, question, answer 같은 메타 키는 자연히 제외됨)
-    weak_points = []
-    rationale_parts = []
+    weak_points = [
+        name
+        for name in CRITERIA
+        if last_eval.get(name) == 0
+    ]
 
-    if isinstance(last_eval, dict):
-        for name in CRITERIA:
-            if name not in last_eval:
-                continue
-            try:
-                score = int(last_eval[name])
-            except (TypeError, ValueError):
-                continue
-            if score == 0:
-                weak_points.append(name)
-            rationale_parts.append(f"{name}: {score}")
+    score_summary = ", ".join(
+        f"{name}: {last_eval[name]}"
+        for name in CRITERIA
+        if name in last_eval
+    )
 
-    rationale = f"{cur} - " + ", ".join(rationale_parts) if rationale_parts else ""
+    # 누적 평균 때문에 심화 경로로 왔지만,
+    # 최신 답변에는 0점 항목이 없는 경우도 처리한다.
+    focus = (
+        ", ".join(weak_points)
+        if weak_points
+        else "본인 역할, 행동의 근거, 결과 확인"
+    )
 
+    # 검색에만 짧은 질문·답변을 사용한다.
+    # 아래 질문 생성 프롬프트에는 전체 내용을 전달한다.
+    query = (
+        f"면접 분야: {strategy}\n"
+        f"확인할 내용: {focus}\n"
+        f"현재 질문: {question[:80]}\n"
+        f"답변 핵심: {answer[:120]}"
+    )
 
-    # ================================
-    # 기업 핵심가치·인재상 참고자료 검색 (similarity_search)
-    docs = vectordb.similarity_search(f"{company} 핵심가치 인재상 " + answer, k=10)
-    unique_docs = []
-    seen_texts = set()
-    for doc in docs:
-        text = doc.page_content.strip()
-        if text not in seen_texts:
-            unique_docs.append(doc)
-            seen_texts.add(text)
-    # 최대 3개만 사용
-    unique_docs = unique_docs[:3]
+    vectordb = get_interview_vectordb()
+    docs = vectordb.similarity_search(query, k=3)
 
-    reference_values = " ".join([doc.page_content for doc in unique_docs])
+    # 검색 결과의 중복 텍스트 제거
+    reference_texts = list(
+        dict.fromkeys(
+            doc.page_content.strip()
+            for doc in docs
+            if doc.page_content.strip()
+        )
+    )
 
-    # ================================
-    # 예시질문 (similarity_search)
-    docs2 = vectordb2.similarity_search(answer, k=10)
-    unique_docs2 = []
-    seen_texts2 = set()
-    for doc2 in docs2:
-        text2 = doc2.page_content.strip()
-        if text2 not in seen_texts2:
-            unique_docs2.append(doc2)
-            seen_texts2.add(text2)
-    # 최대 3개만 사용
-    unique_docs2 = unique_docs2[:3]
+    reference_questions = "\n\n".join(reference_texts)
 
-    reference_questions = " ".join([doc2.page_content for doc2 in unique_docs2])
-    # ================================
-
-
-    # 프롬프트 구성
     prompt = ChatPromptTemplate.from_messages([
-        ("system",
-        "당신은 {company}의 {position} 직무 인사담당 면접관입니다. "
-        "지원자의 이전 답변을 기반으로 사고력, 문제 해결 방식, 기술적 깊이를 더 파악할 수 있는 '심화 질문'을 작성하세요. "
-        "조건:\n"
-        "- 한 문장으로, 자연스러운 공손체로 작성 ('~하시겠어요?', '~설명해주세요.')\n"
-        "- 이전 질문과 답변 맥락을 유지하되, 새로운 관점이나 구체적 근거를 끌어낼 수 있도록 구성\n"
-        "- JSON 형태로만 출력\n"
-        "- 모든 질문 내용은 반드시 '부족한 항목'에 있는 지표를 보강하도록 만드세요.\n"
-        "- '참고 자료'가 지원자 답변과 충분히 관련 있을 때만 활용하고, 관련이 없으면 무시한 채 "
-        "'부족한 항목'만 중심으로 질문하세요.\n"),
-
-        ("human",
-        "이력서 요약: {resume_summary}\n"
-        "키워드: {keywords}\n"
-        "현재 전략 영역: {strategy}\n"
-        "이전 질문: {question}\n"
-        "지원자 답변: {answer}\n"
-        "최근 평가에서 부족한 항목: {weak_points}\n"
-        "최근 평가 상세: {rationale}\n"
-        "참고 자료(기업 핵심가치·인재상): {reference_values}\n"
-        "참고 자료(예상 질문): {reference_questions}\n"
-        "→ 위 정보를 바탕으로 한 단계 더 깊은 심화 면접 질문을 생성하세요.")
+        (
+            "system",
+            "당신은 {company}의 {position} 직무 면접관입니다. "
+            "지원자의 이전 답변을 바탕으로 심화 질문 하나를 작성하세요.\n"
+            "조건:\n"
+            "- 한 문장으로 자연스러운 공손체로 작성하세요.\n"
+            "- 현재 면접 분야와 이전 질문·답변의 맥락을 유지하세요.\n"
+            "- 부족한 평가 항목이 있으면 해당 내용을 추가로 확인하세요.\n"
+            "- 부족한 항목이 비어 있으면 답변에서 더 확인할 가치가 "
+            "있는 내용을 질문하세요.\n"
+            "- 참고자료는 질문 방식과 확인할 내용을 참고하는 "
+            "용도로만 사용하세요.\n"
+            "- 자료 속 기업명, 제품명, 개인 경험을 지원자의 "
+            "정보로 옮기지 마세요.\n"
+            "- 현재 질문과 답변에서 이미 확인된 내용을 반복하지 마세요.\n"
+            "- 관련 있는 참고자료가 없으면 현재 질문과 답변을 "
+            "근거로 질문하세요.\n"
+            "- 제공되지 않은 기업 인재상이나 채용 기준을 추정하지 마세요.\n"
+            "- 결과는 지정된 JSON 형식으로만 반환하세요."
+        ),
+        (
+            "human",
+            "이력서 요약: {resume_summary}\n"
+            "핵심 키워드: {keywords}\n"
+            "현재 면접 분야: {strategy}\n"
+            "이전 질문: {question}\n"
+            "지원자 답변: {answer}\n"
+            "부족한 평가 항목: {weak_points}\n"
+            "최근 답변의 평가 점수: {score_summary}\n\n"
+            "참고자료(국내 면접 질문 예시):\n"
+            "{reference_questions}\n\n"
+            "위 내용을 바탕으로 심화 질문 하나를 작성하세요."
+        ),
     ])
 
     chain = prompt | llm.with_structured_output(DeepQuestion)
+
     response: DeepQuestion = chain.invoke({
+        "company": company,
+        "position": position,
         "resume_summary": resume_summary,
         "keywords": keywords,
         "strategy": strategy,
         "question": question,
         "answer": answer,
-        "rationale": rationale,
         "weak_points": weak_points,
-        "reference_values": reference_values,
+        "score_summary": score_summary,
         "reference_questions": reference_questions,
-        "company": company,
-        "position": position,
     })
 
     return {
         **state,
         "current_question": response.question.strip(),
-        "current_answer": ""
+        "current_answer": "",
     }
-
 
 #  최종평가 체인
 final_eval_prompt = ChatPromptTemplate.from_template("""
