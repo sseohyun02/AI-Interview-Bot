@@ -69,8 +69,8 @@ flowchart TD
 |:---:|---|
 | **Frontend** | ![React](https://img.shields.io/badge/React-61DAFB?style=flat-square&logo=react&logoColor=white) ![JavaScript](https://img.shields.io/badge/JavaScript-F7DF1E?style=flat-square&logo=javascript&logoColor=black) ![Vite](https://img.shields.io/badge/Vite-646CFF?style=flat-square&logo=vite&logoColor=white) |
 | **Backend** | ![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white) ![Python](https://img.shields.io/badge/Python-3776AB?style=flat-square&logo=python&logoColor=white) ![SQLAlchemy](https://img.shields.io/badge/SQLAlchemy-D71F00?style=flat-square&logo=sqlalchemy&logoColor=white) |
-| **AI / RAG** | LangChain · LangGraph · Gemini API (`gemini-3.5-flash-lite`) · Sentence Transformers (`jhgan/ko-sroberta-multitask`) |
-| **문서 처리** | PyMuPDF · python-docx |
+| **AI / RAG** | ![LangChain](https://img.shields.io/badge/LangChain-1C3C3C?style=flat-square&logo=langchain&logoColor=white) ![LangGraph](https://img.shields.io/badge/LangGraph-1C3C3C?style=flat-square&logo=langgraph&logoColor=white) ![Gemini API](https://img.shields.io/badge/Gemini%20API-8E75B2?style=flat-square&logo=googlegemini&logoColor=white) (`gemini-3.5-flash-lite`) · ![Sentence Transformers](https://img.shields.io/badge/Sentence%20Transformers-FFD21E?style=flat-square&logo=huggingface&logoColor=black) (`jhgan/ko-sroberta-multitask`) |
+| **문서 처리** | ![PyMuPDF](https://img.shields.io/badge/PyMuPDF-00695C?style=flat-square) ![python-docx](https://img.shields.io/badge/python--docx-3776AB?style=flat-square&logo=python&logoColor=white) |
 | **DB** | ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?style=flat-square&logo=postgresql&logoColor=white) ![Chroma](https://img.shields.io/badge/Chroma-555555?style=flat-square) |
 | **인증** | ![JWT](https://img.shields.io/badge/JWT-000000?style=flat-square&logo=jsonwebtokens&logoColor=white) ![bcrypt](https://img.shields.io/badge/bcrypt-555555?style=flat-square) |
 
